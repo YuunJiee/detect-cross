@@ -8,8 +8,6 @@
 
 ```
 detectCross/
-├── positive/               ← 正樣本（已提供，交界點在圖片中心）
-├── negative/               ← 負樣本（需建立，見 STEP 1）
 ├── original_image/         ← 要偵測的大圖
 ├── models/                 ← 訓練好的模型
 │   └── cross_detector_v1.pth
