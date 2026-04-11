@@ -1,0 +1,41 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+venv/
+.venv/
+
+# Notebook
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Training outputs and temporary folders
+results/
+data/
+new_tiles/
+cropped_161/
+_deleted/
+
+# Model weights / checkpoints
+models/*.pth
+models/*.pt
+models/*.onnx
+
+# Large image datasets (keep out of git)
+original_image/
+positive/
+negative/
+DamBreachTrackingTest/
+原始照片/
+
+# Windows alternate data streams
+*:Zone.Identifier
