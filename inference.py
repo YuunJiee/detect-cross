@@ -14,8 +14,12 @@
 """
 
 import argparse
+import multiprocessing
 import time
 from pathlib import Path
+from types import SimpleNamespace
+
+from tqdm import tqdm
 
 import cv2
 import torch
@@ -46,6 +50,22 @@ def parse_args():
     parser.add_argument(
         "--photo-dir", default="原始照片",
         help="批次模式下的圖片資料夾",
+    )
+    parser.add_argument(
+        "--start", type=int, default=None,
+        help="批次模式：從第幾張開始（1-based，含）",
+    )
+    parser.add_argument(
+        "--end", type=int, default=None,
+        help="批次模式：到第幾張結束（1-based，含）",
+    )
+    parser.add_argument(
+        "--step", type=int, default=1,
+        help="批次模式：每幾張取一張（預設 1 = 全取，20 = 每 20 張跑一張）",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="批次模式：並行進程數（建議設為 CPU 核心數，例如 --workers 8）",
     )
     parser.add_argument(
         "--model", default="models/cross_detector_v1.pth",
@@ -208,23 +228,32 @@ def process_image(
     args,
     out_dir: Path,
 ) -> None:
+    t_total = time.time()
+
     img = cv2.imread(str(img_path))
     if img is None:
         print(f"[警告] 無法開啟：{img_path}")
         return
+    t_read = time.time() - t_total
 
     h, w = img.shape[:2]
-    t0 = time.time()
     print(f"\n處理：{img_path.name}  ({w}×{h}px)")
 
     device = next(model.parameters()).device.type
+
+    t1 = time.time()
     candidates = sliding_window_inference(
         img, model, transform, pos_idx, args.stride, args.threshold, device
     )
-    points = non_maximum_suppression(candidates, args.nms_dist)
+    t_infer = time.time() - t1
 
-    elapsed = time.time() - t0
-    print(f"  候選點：{len(candidates)}  →  NMS 後：{len(points)}  ({elapsed:.1f}s)")
+    t2 = time.time()
+    points = non_maximum_suppression(candidates, args.nms_dist)
+    t_nms = time.time() - t2
+
+    t_elapsed = time.time() - t_total
+    print(f"  候選點：{len(candidates)}  →  NMS 後：{len(points)}")
+    print(f"  耗時：讀圖 {t_read:.2f}s  |  滑窗推論 {t_infer:.1f}s  |  NMS {t_nms:.3f}s  |  總計 {t_elapsed:.1f}s")
 
     for i, (cx, cy, prob) in enumerate(points, 1):
         print(f"  [{i:3d}]  cx={cx:5d}  cy={cy:5d}  信心={prob:.3f}")
@@ -246,6 +275,27 @@ def process_image(
 
     print(f"  結果圖：{out_path}")
     print(f"  座標表：{csv_path}")
+
+
+# ─── 多進程 worker ────────────────────────────────────────────────────────────
+
+_g_model = None
+_g_transform = None
+_g_pos_idx = None
+_g_device = None
+
+
+def _worker_init(model_path: str, device: str):
+    global _g_model, _g_transform, _g_pos_idx, _g_device
+    _g_model, _g_pos_idx = load_model(model_path, device)
+    _g_transform = make_transform()
+    _g_device = device
+
+
+def _worker_task(task: tuple) -> None:
+    img_path_str, stride, threshold, nms_dist, out_dir_str = task
+    fake_args = SimpleNamespace(stride=stride, threshold=threshold, nms_dist=nms_dist)
+    process_image(Path(img_path_str), _g_model, _g_transform, _g_pos_idx, fake_args, Path(out_dir_str))
 
 
 # ─── 主程式 ───────────────────────────────────────────────────────────────────
@@ -271,8 +321,10 @@ def main():
         device = "cpu"
     print(f"使用裝置：{device}")
 
+    t_load = time.time()
     model, pos_idx = load_model(str(model_path), device)
     transform = make_transform()
+    print(f"  模型載入耗時：{time.time() - t_load:.2f}s")
 
     print(f"\n推論設定")
     print(f"  信心門檻：{args.threshold}")
@@ -287,9 +339,35 @@ def main():
         )
         if not images:
             raise SystemExit(f"在 {photo_dir} 找不到圖片")
-        print(f"\n批次處理：{len(images)} 張")
-        for img_path in images:
-            process_image(img_path, model, transform, pos_idx, args, out_dir)
+
+        start_idx = (args.start - 1) if args.start is not None else 0
+        end_idx   = args.end if args.end is not None else len(images)
+        images = images[start_idx:end_idx:args.step]
+        if not images:
+            raise SystemExit(f"指定範圍 {args.start}–{args.end} 沒有任何圖片")
+
+        step_hint = f"，每 {args.step} 張取一張" if args.step > 1 else ""
+        range_hint = f"（第 {start_idx + 1}–{start_idx + len(images) * args.step} 張{step_hint}）"
+        print(f"\n批次處理：{len(images)} 張 {range_hint}")
+
+        if args.workers > 1:
+            print(f"  使用 {args.workers} 個並行進程")
+            tasks = [
+                (str(p), args.stride, args.threshold, args.nms_dist, str(out_dir))
+                for p in images
+            ]
+            ctx = multiprocessing.get_context("spawn")
+            with ctx.Pool(
+                processes=args.workers,
+                initializer=_worker_init,
+                initargs=(str(model_path), device),
+            ) as pool:
+                with tqdm(total=len(tasks), desc="批次推論", unit="張") as pbar:
+                    for _ in pool.imap_unordered(_worker_task, tasks):
+                        pbar.update()
+        else:
+            for img_path in tqdm(images, desc="批次推論", unit="張"):
+                process_image(img_path, model, transform, pos_idx, args, out_dir)
     else:
         process_image(Path(args.image), model, transform, pos_idx, args, out_dir)
 

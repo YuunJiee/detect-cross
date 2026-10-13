@@ -39,3 +39,5 @@ DamBreachTrackingTest/
 
 # Windows alternate data streams
 *:Zone.Identifier
+
+*.zip
